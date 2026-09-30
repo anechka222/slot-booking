@@ -1,0 +1,26 @@
+services:
+
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: slotuser
+      POSTGRES_PASSWORD: slotpassword
+      POSTGRES_DB: slotdb
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
