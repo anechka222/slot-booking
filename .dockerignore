@@ -1,2 +1,6 @@
 .env
 .git
+firewall/
+gateway/
+*.md
+test-firewall.sh

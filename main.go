@@ -39,17 +39,25 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	amqpURL := url.URL{
+		Scheme: "amqp",
+		User:   url.UserPassword(os.Getenv("RABBITMQ_USER"), os.Getenv("RABBITMQ_PASSWORD")),
+		Host:   env("RABBITMQ_HOST", "rabbitmq") + ":5672",
+	}
+
+	// Один образ, два режима: MODE=notifier запускает только consumer.
+	// Notifier не получает ни доступа, ни паролей к Postgres и Redis.
+	if env("MODE", "api") == "notifier" {
+		runNotifier(ctx, amqpURL.String())
+		return
+	}
+
 	// URL собираем через net/url, чтобы спецсимволы в паролях не ломали строку подключения.
 	pgURL := url.URL{
 		Scheme: "postgres",
 		User:   url.UserPassword(os.Getenv("POSTGRES_USER"), os.Getenv("POSTGRES_PASSWORD")),
 		Host:   env("POSTGRES_HOST", "postgres") + ":5432",
 		Path:   "/" + os.Getenv("POSTGRES_DB"),
-	}
-	amqpURL := url.URL{
-		Scheme: "amqp",
-		User:   url.UserPassword(os.Getenv("RABBITMQ_USER"), os.Getenv("RABBITMQ_PASSWORD")),
-		Host:   env("RABBITMQ_HOST", "rabbitmq") + ":5672",
 	}
 
 	var store *Store
@@ -80,12 +88,6 @@ func main() {
 		log.Fatal(err)
 	}
 	defer broker.Close()
-
-	go func() {
-		if err := broker.Consume(ctx); err != nil {
-			log.Printf("consumer остановлен: %v", err)
-		}
-	}()
 
 	h := &Handler{store: store, rdb: rdb, broker: broker}
 	srv := &http.Server{

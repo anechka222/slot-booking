@@ -1,11 +1,23 @@
+
 FROM golang:1.27-alpine AS build
+
 WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
 COPY . .
-RUN go mod tidy && CGO_ENABLED=0 go build -o /server .
+RUN CGO_ENABLED=0 go build -o /server .
 
 FROM alpine:3
-RUN adduser -D -u 10001 app
+
+RUN apk add --no-cache wget \
+    && adduser -D -u 10001 app
+
 USER app
+
 COPY --from=build /server /server
+
 EXPOSE 8080
+
 CMD ["/server"]
