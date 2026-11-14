@@ -1,6 +1,8 @@
 .env
 .git
-firewall/
+backups/
+scripts/
 gateway/
 *.md
+*.exe
 test-firewall.sh

@@ -1,12 +1,11 @@
 #!/bin/sh
-# Применяет правила файрвола в сетевом пространстве (netns) целевого контейнера.
-# Запускается sidecar-контейнером с network_mode: "service:<цель>" и cap NET_ADMIN.
-# Правила живут в netns цели, пока жив сам контейнер-цель.
+# Применяет правила файрвола в сетевом пространстве текущего контейнера.
+# Вызывается из entry.sh при каждом старте контейнера.
 set -eu
 
-HOST="${1:?укажи хост: apigw | app | notifier | postgres | redis | rabbitmq}"
-RULES="/rules/${HOST}.sh"
-[ -f "$RULES" ] || { echo "нет файла правил $RULES" >&2; exit 1; }
+HOST="${1:?укажи набор правил: apigw | app | notifier | postgres | redis | rabbitmq | backup}"
+RULES="/fw/rules/${HOST}.sh"
+[ -f "$RULES" ] || { echo "[fw] нет файла правил $RULES" >&2; exit 1; }
 
 ipt() { iptables -w "$@"; }
 
@@ -51,5 +50,4 @@ ipt -A INPUT  -m conntrack --ctstate INVALID -m comment --comment "битые п
 ipt -A INPUT  -m comment --comment "DEFAULT DENY" -j DROP
 ipt -A OUTPUT -m comment --comment "DEFAULT DENY" -j DROP
 
-echo "[fw:$HOST] правила применены"
-ipt -L -n -v --line-numbers
+echo "[fw:$HOST] правила применены ($(ipt -S | wc -l) шт.)"

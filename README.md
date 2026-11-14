@@ -1,55 +1,80 @@
-# ДЗ 4. Сегментация сетей и файрвол
+# Система бронирования слотов
+
+Микросервисы на Go: booking API (2 реплики), notification-service, PostgreSQL, Redis,
+RabbitMQ, API gateway на nginx, резервное копирование БД.
+
+- Параметры надёжности (SLO, MTBF, MTTR, RPO/RTO) и бэкапы описаны в [RELIABILITY.md](RELIABILITY.md).
 
 ## Схема
 
 ```
-              host (127.0.0.1:8080)
-                      │
-  edge-net 10.1.1.0/28 │
-              ┌───────▼───────┐
-              │ apigw (nginx) │ 10.1.1.2 / 10.1.2.2
-              └───────┬───────┘
-  app-net 10.1.2.0/28  │  internal
-              ┌───────▼───────┐
-              │ app (booking) │ 10.1.2.3 / 10.1.3.3
-              └───────┬───────┘
-  data-net 10.1.3.0/28 │  internal
-   ┌────────┬─────────┼─────────┬──────────────┐
- postgres  redis   rabbitmq ◄── notifier
- .10       .11     .12          .4
+                     host (127.0.0.1:8080)
+                             │
+  edge-net 10.1.1.0/28        │
+                     ┌───────▼───────┐
+                     │ apigw (nginx) │ 10.1.1.2 / 10.1.2.2
+                     └──┬─────────┬──┘
+  app-net 10.1.2.0/28   │internal │
+               ┌────────▼┐      ┌─▼───────┐
+               │  app-1  │      │  app-2  │  .3 / .4
+               └────┬────┘      └────┬────┘
+  data-net 10.1.3.0/28  │  internal │   (app-1 .3, app-2 .5)
+   ┌────────┬───────────┼───────────┴──┬────────────┐
+ postgres  redis     rabbitmq ◄── notifier     pg-backup ──► postgres
+ .10       .11       .12          .4           .6
 ```
 
-Два уровня защиты:
-1. **Сегментация (L3).** Три docker-сети. `app-net` и `data-net` — `internal: true`, без выхода в интернет. Gateway физически не видит слой данных.
-2. **Файрвол на каждом контейнере.** Sidecar `fw-*` с `network_mode: service:<цель>` и `NET_ADMIN` пишет iptables-правила в сетевое пространство цели. Политика по умолчанию — DROP, затем явные запреты и явные разрешения.
+Защита:
+1. **Сегментация.** Три docker-сети. `app-net` и `data-net` — `internal: true`.
+2. **Файрвол в каждом контейнере.** `firewall/entry.sh` при каждом старте применяет
+   правила из `firewall/rules/<сервис>.sh` (по умолчанию DROP, затем явные запреты и
+   разрешения), убирает у процесса `NET_ADMIN` и только потом запускает сервис.
+   Официальные образы обёрнуты в `firewall/Dockerfile`.
 
 ## Матрица доступа
 
 | Откуда → куда | Порт | Решение |
 |---|---|---|
 | клиент → apigw | 80 (8080 на хосте) | разрешено |
-| apigw → app | 8080 | разрешено |
-| app → postgres / redis / rabbitmq | 5432 / 6379 / 5672 | разрешено |
+| apigw → app-1, app-2 | 8080 | разрешено |
+| app-1, app-2 → postgres / redis / rabbitmq | 5432 / 6379 / 5672 | разрешено |
 | notifier → rabbitmq | 5672 | разрешено |
+| pg-backup → postgres | 5432 | разрешено |
 | notifier → postgres / redis | 5432 / 6379 | **явный запрет** |
-| apigw → слой данных | любой | **явный запрет** + нет маршрута |
+| pg-backup → redis / rabbitmq | 6379 / 5672 | **явный запрет** |
+| apigw → слой данных | любой | **явный запрет** и нет маршрута |
 | app → rabbitmq management | 15672 | **явный запрет** |
 | app → apigw (инициирование) | любой | **явный запрет** |
 | слой данных → кто угодно (инициирование) | любой | **явный запрет** |
 | чужой контейнер в data-net → postgres | 5432 | запрет (default deny) |
 | host → postgres / redis / rabbitmq | — | порты не опубликованы |
 
-## Запуск и проверка
+## Запуск
 
 ```bash
-docker compose down -v          # старые сети и контейнеры
-docker compose up -d --build
-docker compose ps -a            # fw-* должны быть Exited (0)
-./test-firewall.sh              # Git Bash / WSL
-docker compose logs fw-postgres # список правил со счётчиками
+cp .env.example .env                 # задать пароли
+docker compose down                  # остановить старую версию (тома с данными сохранятся)
+docker compose up -d --build --remove-orphans   # удалит старые fw-* sidecar из ДЗ 4
+docker compose ps                    # все сервисы Up / healthy
 ```
 
-## Ограничения
+## Проверка (Git Bash или WSL)
 
-- Правила живут в сетевом пространстве контейнера. После `docker restart postgres` их нужно применить заново: `docker compose up -d fw-postgres`.
-- Между стартом контейнера и отработкой его `fw-*` есть короткое окно без правил. В Kubernetes эту задачу решают NetworkPolicy, которые применяются до старта пода.
+```bash
+./test-firewall.sh                   # сетевой доступ
+./scripts/chaos-test.sh              # отказоустойчивость, замер MTTR
+./scripts/sli-report.sh              # доступность и задержка
+./scripts/restore.sh                 # список резервных копий
+./scripts/restore.sh <файл.dump>     # проверочное восстановление
+docker exec booking-postgres iptables -L -n -v   # правила файрвола со счётчиками
+```
+
+## API
+
+```bash
+curl -X POST localhost:8080/bookings -H 'Content-Type: application/json' \
+  -d '{"resource_id":"room-1","user_id":"anna","slot_start":"2026-12-01T10:00:00Z"}'
+curl -i localhost:8080/bookings/1        # X-Cache: MISS, затем HIT
+curl -X DELETE localhost:8080/bookings/1
+curl localhost:8080/health
+```

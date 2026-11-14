@@ -53,11 +53,28 @@ func NewStore(ctx context.Context, dsn string) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
-	if _, err := pool.Exec(ctx, schema); err != nil {
+	if err := migrate(ctx, pool); err != nil {
 		pool.Close()
 		return nil, err
 	}
 	return &Store{pool: pool}, nil
+}
+
+// migrate создаёт схему. Реплик app несколько, и они стартуют одновременно:
+// advisory-блокировка не даёт им выполнять CREATE параллельно.
+func migrate(ctx context.Context, pool *pgxpool.Pool) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(424242)`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, schema); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) Close()                         { s.pool.Close() }

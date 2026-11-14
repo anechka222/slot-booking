@@ -1,0 +1,3 @@
+# Образ с сетевыми утилитами для тестов (test-firewall.sh, chaos-test.sh).
+FROM alpine:3
+RUN apk add --no-cache iptables netcat-openbsd iputils-ping

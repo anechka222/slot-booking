@@ -168,17 +168,26 @@ func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 
-	status := map[string]string{"postgres": "ok", "redis": "ok", "rabbitmq": "ok"}
+	status := map[string]string{
+		"postgres": "ok",
+		"redis":    "ok",
+		"rabbitmq": "ok",
+	}
 	code := http.StatusOK
+
 	if err := h.store.Ping(ctx); err != nil {
-		status["postgres"], code = "down", http.StatusServiceUnavailable
+		status["postgres"] = "down"
+		code = http.StatusServiceUnavailable
 	}
+
 	if err := h.rdb.Ping(ctx).Err(); err != nil {
-		status["redis"], code = "down", http.StatusServiceUnavailable
+		status["redis"] = "down"
 	}
+
 	if !h.broker.Healthy() {
-		status["rabbitmq"], code = "down", http.StatusServiceUnavailable
+		status["rabbitmq"] = "down"
 	}
+
 	writeJSON(w, code, status)
 }
 

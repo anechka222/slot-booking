@@ -1,20 +1,52 @@
+# Параметры обслуживания (SLO, MTBF, MTTR, RPO/RTO) и обоснование настроек — RELIABILITY.md
+#
 # Сегменты (IP-план 10.<DC>.<сегмент>.<хост>, DC = 1):
 #   edge-net  10.1.1.0/28  — публичный сегмент gateway
 #   app-net   10.1.2.0/28  — сервисы (internal, без выхода наружу)
-#   data-net  10.1.3.0/28  — БД, кэш, брокер (internal, без выхода наружу)
-# Поверх сегментов на каждом контейнере свой файрвол (fw-* sidecar, iptables).
+#   data-net  10.1.3.0/28  — БД, кэш, брокер, бэкапы (internal)
+# Файрвол встроен в каждый контейнер (firewall/entry.sh): правила применяются при
+# каждом старте, в том числе после автоперезапуска, затем у процесса отбирается NET_ADMIN.
 
-x-firewall: &firewall
-  build: ./firewall
-  image: slot-booking-fw
-  cap_add: [NET_ADMIN]
-  restart: "no"
+x-reliable: &reliable
+  restart: unless-stopped            # автоперезапуск после падения (MTTR — секунды)
+  cap_add: [NET_ADMIN]               # нужен только entry.sh для настройки файрвола
+  logging:                           # ротация логов: переполнение диска не уронит хост
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+x-app: &app
+  <<: *reliable
+  build: .
+  image: slot-booking
+  env_file: [.env]
+  environment:
+    FW_HOST: app
+    POSTGRES_HOST: postgres
+    REDIS_ADDR: redis:6379
+    RABBITMQ_HOST: rabbitmq
+  stop_grace_period: 15s             # успеть завершить текущие запросы
+  healthcheck:
+    test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health >/dev/null || exit 1"]
+    interval: 5s
+    timeout: 3s
+    retries: 3
+    start_period: 60s
+    start_interval: 1s
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis:    { condition: service_healthy }
+    rabbitmq: { condition: service_healthy }
 
 services:
   # ---------- Gateway segment ----------
   apigw:
-    image: nginx:1.27-alpine
+    <<: *reliable
+    build: { context: ./firewall, args: { BASE: "nginx:1.27-alpine" } }
+    image: booking-apigw
     container_name: booking-apigw
+    entrypoint: ["/bin/sh", "/fw/entry.sh", "/docker-entrypoint.sh"]
+    command: ["nginx", "-g", "daemon off;"]
+    environment: { FW_HOST: apigw }
     volumes:
       - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
@@ -23,51 +55,32 @@ services:
       edge-net: { ipv4_address: 10.1.1.2 }
       app-net:  { ipv4_address: 10.1.2.2 }
     depends_on:
-      app:    { condition: service_healthy }
-      fw-app: { condition: service_completed_successfully }
+      app-1: { condition: service_healthy }
+      app-2: { condition: service_healthy }
 
-  fw-apigw:
-    <<: *firewall
-    network_mode: "service:apigw"
-    command: ["apigw"]
-
-  # ---------- App segment ----------
-  app:
-    build: .
-    image: slot-booking
-    container_name: booking-app
-    env_file: [.env]
-    environment:
-      POSTGRES_HOST: postgres
-      REDIS_ADDR: redis:6379
-      RABBITMQ_HOST: rabbitmq
+  # ---------- App segment: две реплики за балансировщиком ----------
+  app-1:
+    <<: *app
+    container_name: booking-app-1
     networks:
       app-net:  { ipv4_address: 10.1.2.3 }
       data-net: { ipv4_address: 10.1.3.3 }
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health >/dev/null || exit 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    depends_on:
-      postgres:    { condition: service_healthy }
-      redis:       { condition: service_healthy }
-      rabbitmq:    { condition: service_healthy }
-      fw-postgres: { condition: service_completed_successfully }
-      fw-redis:    { condition: service_completed_successfully }
-      fw-rabbitmq: { condition: service_completed_successfully }
 
-  fw-app:
-    <<: *firewall
-    network_mode: "service:app"
-    command: ["app"]
+  app-2:
+    <<: *app
+    container_name: booking-app-2
+    networks:
+      app-net:  { ipv4_address: 10.1.2.4 }
+      data-net: { ipv4_address: 10.1.3.5 }
 
   notifier:
+    <<: *reliable
     build: .
     image: slot-booking
     container_name: booking-notifier
     # Только то, что нужно сервису: без паролей от БД и Redis
     environment:
+      FW_HOST: notifier
       MODE: notifier
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USER: ${RABBITMQ_USER}
@@ -75,19 +88,18 @@ services:
     networks:
       data-net: { ipv4_address: 10.1.3.4 }
     depends_on:
-      rabbitmq:    { condition: service_healthy }
-      fw-rabbitmq: { condition: service_completed_successfully }
-
-  fw-notifier:
-    <<: *firewall
-    network_mode: "service:notifier"
-    command: ["notifier"]
+      rabbitmq: { condition: service_healthy }
 
   # ---------- Data segment ----------
   postgres:
-    image: postgres:17-alpine
+    <<: *reliable
+    build: { context: ./firewall, args: { BASE: "postgres:17-alpine" } }
+    image: booking-postgres
     container_name: booking-postgres
+    entrypoint: ["/bin/sh", "/fw/entry.sh", "docker-entrypoint.sh"]
+    command: ["postgres"]
     environment:
+      FW_HOST: postgres
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
@@ -95,22 +107,56 @@ services:
       - pgdata:/var/lib/postgresql/data
     networks:
       data-net: { ipv4_address: 10.1.3.10 }
+    stop_grace_period: 30s           # чистое завершение с checkpoint
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 5
+      start_period: 60s
+      start_interval: 1s
 
-  fw-postgres:
-    <<: *firewall
-    network_mode: "service:postgres"
-    command: ["postgres"]
+  pg-backup:
+    <<: *reliable
+    build: { context: ./firewall, args: { BASE: "postgres:17-alpine" } }
+    image: booking-pg-backup
+    container_name: booking-pg-backup
+    entrypoint: ["/bin/sh", "/fw/entry.sh"]
+    command: ["/bin/sh", "/scripts/backup.sh"]
+    # Только доступ к БД: без паролей от Redis и RabbitMQ
+    environment:
+      FW_HOST: backup
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      BACKUP_INTERVAL: ${BACKUP_INTERVAL:-3600}   # RPO = 1 час
+      BACKUP_KEEP: ${BACKUP_KEEP:-48}             # хранить 48 копий (2 суток)
+    volumes:
+      - ./scripts/backup.sh:/scripts/backup.sh:ro
+      # Папка на хосте, а не docker volume: копии переживут `docker compose down -v`
+      - ./backups:/backups
+    networks:
+      data-net: { ipv4_address: 10.1.3.6 }
+    # unhealthy, если свежей копии нет дольше двух интервалов (бэкапы «молча» сломались)
+    healthcheck:
+      test: ["CMD-SHELL", "test -n \"$$(find /backups -name '*.dump' -mmin -$$((BACKUP_INTERVAL * 2 / 60 + 1)))\""]
+      interval: 60s
+      timeout: 10s
+      retries: 1
+      start_period: 120s
+    depends_on:
+      postgres: { condition: service_healthy }
 
   redis:
-    image: redis:7-alpine
+    <<: *reliable
+    build: { context: ./firewall, args: { BASE: "redis:7-alpine" } }
+    image: booking-redis
     container_name: booking-redis
+    entrypoint: ["/bin/sh", "/fw/entry.sh", "docker-entrypoint.sh"]
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
     environment:
+      FW_HOST: redis
       REDIS_PASSWORD: ${REDIS_PASSWORD}
     networks:
       data-net: { ipv4_address: 10.1.3.11 }
@@ -118,31 +164,33 @@ services:
       test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
       interval: 5s
       timeout: 5s
-      retries: 10
-
-  fw-redis:
-    <<: *firewall
-    network_mode: "service:redis"
-    command: ["redis"]
+      retries: 5
+      start_period: 30s
+      start_interval: 1s
 
   rabbitmq:
-    image: rabbitmq:4-management-alpine
+    <<: *reliable
+    build: { context: ./firewall, args: { BASE: "rabbitmq:4-management-alpine" } }
+    image: booking-rabbitmq
     container_name: booking-rabbitmq
+    hostname: booking-rabbitmq       # имя узла RabbitMQ постоянно, иначе данные в томе «теряются»
+    entrypoint: ["/bin/sh", "/fw/entry.sh", "docker-entrypoint.sh"]
+    command: ["rabbitmq-server"]
     environment:
+      FW_HOST: rabbitmq
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    volumes:
+      - rabbitdata:/var/lib/rabbitmq  # очередь и persistent-сообщения переживают пересоздание
     networks:
       data-net: { ipv4_address: 10.1.3.12 }
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
       timeout: 5s
-      retries: 10
-
-  fw-rabbitmq:
-    <<: *firewall
-    network_mode: "service:rabbitmq"
-    command: ["rabbitmq"]
+      retries: 5
+      start_period: 60s
+      start_interval: 2s
 
 networks:
   edge-net:
@@ -162,3 +210,4 @@ networks:
 
 volumes:
   pgdata:
+  rabbitdata:

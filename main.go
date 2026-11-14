@@ -22,7 +22,8 @@ func env(key, def string) string {
 	return def
 }
 
-// retry нужен, потому что зависимости могут стартовать позже сервиса.
+// retry нужен, потому что зависимости могут стартовать позже сервиса
+// или перезапускаться одновременно с ним.
 func retry(name string, attempts int, fn func() error) error {
 	var err error
 	for i := 1; i <= attempts; i++ {
@@ -60,8 +61,10 @@ func main() {
 		Path:   "/" + os.Getenv("POSTGRES_DB"),
 	}
 
+	// pgxpool и go-redis сами переподключаются после сбоя БД или кэша,
+	// поэтому повторы нужны только при первом подключении.
 	var store *Store
-	if err := retry("postgres", 10, func() error {
+	if err := retry("postgres", 30, func() error {
 		var err error
 		store, err = NewStore(ctx, pgURL.String())
 		return err
@@ -75,12 +78,12 @@ func main() {
 		Password: os.Getenv("REDIS_PASSWORD"),
 	})
 	defer rdb.Close()
-	if err := retry("redis", 10, func() error { return rdb.Ping(ctx).Err() }); err != nil {
+	if err := retry("redis", 30, func() error { return rdb.Ping(ctx).Err() }); err != nil {
 		log.Fatal(err)
 	}
 
 	var broker *Broker
-	if err := retry("rabbitmq", 10, func() error {
+	if err := retry("rabbitmq", 30, func() error {
 		var err error
 		broker, err = NewBroker(amqpURL.String())
 		return err
@@ -88,6 +91,8 @@ func main() {
 		log.Fatal(err)
 	}
 	defer broker.Close()
+	// Клиент AMQP сам не переподключается: следим за соединением сами.
+	go broker.KeepAlive(ctx)
 
 	h := &Handler{store: store, rdb: rdb, broker: broker}
 	srv := &http.Server{

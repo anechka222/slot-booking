@@ -1,0 +1,3 @@
+# Скрипты запускаются в Linux-контейнерах: CRLF из Windows их ломает
+*.sh text eol=lf
+*.conf text eol=lf

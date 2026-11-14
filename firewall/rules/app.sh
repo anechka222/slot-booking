@@ -1,4 +1,6 @@
-# app — booking-service. app-net 10.1.2.3, data-net 10.1.3.3
+# app — booking-service, общий набор для реплик:
+#   app-1: app-net 10.1.2.3, data-net 10.1.3.3
+#   app-2: app-net 10.1.2.4, data-net 10.1.3.5
 
 # Явные запреты
 deny_out all  10.1.2.2    ""    "ЗАПРЕТ: app не инициирует соединения к gateway"

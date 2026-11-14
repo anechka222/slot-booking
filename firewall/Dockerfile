@@ -1,5 +1,8 @@
-FROM alpine:3
-RUN apk add --no-cache iptables netcat-openbsd iputils-ping
-COPY apply.sh /apply.sh
-COPY rules/ /rules/
-ENTRYPOINT ["/bin/sh", "/apply.sh"]
+# Обёртка над официальными образами (postgres, redis, rabbitmq, nginx):
+# добавляет встроенный файрвол. Базовый образ передаётся через BASE.
+ARG BASE=alpine:3
+FROM ${BASE}
+USER root
+RUN apk add --no-cache iptables setpriv
+COPY apply.sh entry.sh /fw/
+COPY rules/ /fw/rules/
