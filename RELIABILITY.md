@@ -154,13 +154,6 @@ docker compose exec redis sh -c 'redis-cli -a "$REDIS_PASSWORD" FLUSHALL'   # с
 ./test-firewall.sh               # матрица сетевого доступа
 ```
 
-Результаты `chaos-test.sh` (фактический MTTR):
-
-| Сценарий | MTTR контейнера | API полностью здоров через | Ошибок у клиента |
-|---|---|---|---|
-| app-1 | | | |
-| apigw | | | |
-| postgres | | | |
 | redis | | | |
 | rabbitmq | | | |
 | notifier | | — | — |
