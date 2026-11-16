@@ -153,7 +153,3 @@ docker compose exec redis sh -c 'redis-cli -a "$REDIS_PASSWORD" FLUSHALL'   # с
 ./scripts/restore.sh <файл>      # проверочное восстановление, время = фактический RTO
 ./test-firewall.sh               # матрица сетевого доступа
 ```
-
-| redis | | | |
-| rabbitmq | | | |
-| notifier | | — | — |
